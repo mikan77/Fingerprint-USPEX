@@ -1,0 +1,6 @@
+ase
+dscribe
+numpy
+pandas
+pymatgen
+
