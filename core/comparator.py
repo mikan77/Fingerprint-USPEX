@@ -365,3 +365,117 @@ class StructureComparator:
     def metric_name(self) -> str:
         """Metric name."""
         return self.metric.name
+class EnsembleComparator:
+    """
+    Combines multiple descriptor-metric pipelines into a single weighted similarity/distance matrix.
+    Supports optional RobustScaler normalization per pipeline before weighted aggregation.
+    """
+
+    def __init__(
+        self,
+        configs: List[Tuple[BaseDescriptor, BaseMetric, float]],
+        use_robust_scaling: bool = False,
+        cache_enabled: bool = True,
+        n_jobs: int = -1,
+        remove_species: Optional[List[str]] = None,
+    ):
+        """
+        Args:
+            configs: List of tuples (descriptor, metric, raw_weight).
+            use_robust_scaling: Apply RobustScaler (median/IQR normalization) to each matrix before combining.
+            cache_enabled: Enable in-memory descriptor caching.
+            n_jobs: Number of CPU cores for parallel execution.
+            remove_species: Elements to remove before descriptor calculation.
+        """
+        if not configs:
+            raise ValueError("At least one (descriptor, metric, weight) configuration is required.")
+            
+        # Validate and normalize weights to sum to 1.0
+        raw_weights = [cfg[2] for cfg in configs]
+        total_weight = sum(raw_weights)
+        if total_weight == 0:
+            raise ValueError("Weights cannot sum to zero.")
+        self.weights = [w / total_weight for w in raw_weights]
+        
+        self.use_robust_scaling = use_robust_scaling
+        self.comparators = [
+            StructureComparator(
+                descriptor=cfg[0],
+                metric=cfg[1],
+                cache_enabled=cache_enabled,
+                n_jobs=n_jobs,
+                remove_species=remove_species,
+                descriptor_normalization=None,  # Handled internally if needed
+            )
+            for cfg in configs
+        ]
+        self._name = "Ensemble_" + "_".join(cfg[1].name for cfg in configs)
+
+    def compare(self, paths: List[Union[str, Path]]) -> np.ndarray:
+        """
+        Compute individual metric matrices, optionally scale them, and return the weighted combination.
+        
+        Args:
+            paths: Structure file paths.
+            
+        Returns:
+            np.ndarray: Combined symmetric matrix [n, n].
+        """
+        if not paths:
+            raise ValueError("Path list cannot be empty.")
+            
+        matrices = []
+        for comp in self.comparators:
+            mat = comp.compare(paths)
+            
+            if self.use_robust_scaling:
+                # RobustScaler operates on 2D arrays. Flatten, scale, reshape to preserve symmetry.
+                scaler = RobustScaler()
+                flat_scaled = scaler.fit_transform(mat.flatten().reshape(-1, 1)).flatten()
+                mat = flat_scaled.reshape(mat.shape)
+                
+            matrices.append(mat)
+            
+        # Weighted linear combination
+        combined = np.zeros_like(matrices[0])
+        for w, m in zip(self.weights, matrices):
+            combined += w * m
+            
+        return combined
+
+    def compare_to_dataframe(
+        self,
+        paths: List[Union[str, Path]],
+        index_start: int = 1
+    ) -> pd.DataFrame:
+        """Compare structures and return the combined result as a pandas DataFrame."""
+        matrix = self.compare(paths)
+        indices = list(range(index_start, index_start + len(paths)))
+        return pd.DataFrame(matrix, index=indices, columns=indices)
+
+    def compare_and_save(
+        self,
+        paths: List[Union[str, Path]],
+        output_file: str,
+        format: str = "txt",
+        unique_pairs_only: bool = True,
+        include_header: bool = False
+    ) -> pd.DataFrame:
+        """Compare structures and save the combined result to a file."""
+        df = self.compare_to_dataframe(paths)
+        writer = FileWriter(output_file)
+        
+        if format == "csv":
+            writer.write_csv(df)
+        elif format == "txt":
+            writer.write_txt(
+                df,
+                unique_pairs_only=unique_pairs_only,
+                method_name=self._name,
+                include_header=include_header
+            )
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+            
+        print(f"Combined results saved to {output_file}")
+        return df

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and local settings
+.env
+.venv/
+venv/
+env/
+
+# macOS and notebook scratch files
+.DS_Store
+.ipynb_checkpoints/
+Untitled*.ipynb
+
+# Generated output
+results/
+*.log
+*.tmp
+Data_for_ovf.bin
+gathered_POSCARS
+rebuilt_POSCARS
+ovf_run_*/
