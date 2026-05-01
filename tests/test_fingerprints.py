@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from ase import Atoms
 
-from core.comparator import StructureComparator
+from core.comparator import StructureComparator, combine_distance_matrices
 from descriptors.cell import CellDescriptor
 from descriptors.soap import SOAPDescriptor
 from metrics.cosine import CosineMetric
@@ -86,6 +86,31 @@ class ComparatorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "not present in descriptor.species"):
             missing_species_comparator._validate_descriptor_species(atoms, "structure.cif")
+
+    def test_combine_distance_matrices_with_robust_sigmoid_scaling(self):
+        rdf = np.array([
+            [0.0, 0.10, 0.40],
+            [0.10, 0.0, 0.25],
+            [0.40, 0.25, 0.0],
+        ])
+        adf = np.array([
+            [0.0, 0.30, 0.90],
+            [0.30, 0.0, 0.60],
+            [0.90, 0.60, 0.0],
+        ])
+
+        combined = combine_distance_matrices(
+            [rdf, adf],
+            weights=[2.0, 1.0],
+            use_robust_scaling=True,
+        )
+
+        self.assertEqual(combined.shape, rdf.shape)
+        np.testing.assert_allclose(combined, combined.T)
+        np.testing.assert_allclose(np.diag(combined), np.zeros(3))
+        np.testing.assert_allclose(combined[1, 2], 0.5)
+        self.assertTrue(np.all(combined >= 0.0))
+        self.assertTrue(np.all(combined <= 1.0))
 
 
 class DescriptorTests(unittest.TestCase):

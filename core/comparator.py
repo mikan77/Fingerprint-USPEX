@@ -1,7 +1,7 @@
 # core/comparator.py
 import hashlib
 import json
-from typing import List, Union, Optional, Dict
+from typing import List, Union, Optional, Dict, Tuple
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -9,9 +9,94 @@ from pathlib import Path
 from ase import Atoms
 
 from pymatgen.core import Structure
+from sklearn.preprocessing import RobustScaler
 
 from core.base import BaseDescriptor, BaseMetric
 from utils.write_file import FileWriter
+
+
+def _normalize_weights(raw_weights: List[float]) -> List[float]:
+    """Normalize non-negative weights to sum to 1.0."""
+    if not raw_weights:
+        raise ValueError("At least one weight is required.")
+    if any(weight < 0 for weight in raw_weights):
+        raise ValueError("Weights cannot be negative.")
+
+    total_weight = sum(raw_weights)
+    if total_weight == 0:
+        raise ValueError("Weights cannot sum to zero.")
+    return [weight / total_weight for weight in raw_weights]
+
+
+def _sigmoid(values: np.ndarray) -> np.ndarray:
+    """Map robust-scaled values to the (0, 1) interval."""
+    clipped = np.clip(values, -500.0, 500.0)
+    return 1.0 / (1.0 + np.exp(-clipped))
+
+
+def _robust_scale_matrix(matrix: np.ndarray, preserve_diagonal: bool = True) -> np.ndarray:
+    """Apply RobustScaler to off-diagonal values and map the result to (0, 1)."""
+    matrix = np.asarray(matrix, dtype=float)
+    scaler = RobustScaler()
+    if preserve_diagonal and matrix.ndim == 2 and matrix.shape[0] == matrix.shape[1]:
+        scaled_matrix = matrix.copy()
+        off_diagonal_mask = ~np.eye(matrix.shape[0], dtype=bool)
+        if np.any(off_diagonal_mask):
+            off_diagonal = matrix[off_diagonal_mask].reshape(-1, 1)
+            scaled_values = scaler.fit_transform(off_diagonal).reshape(-1)
+            scaled_matrix[off_diagonal_mask] = _sigmoid(scaled_values)
+        return scaled_matrix
+
+    original_shape = matrix.shape
+    flat_scaled = scaler.fit_transform(matrix.reshape(-1, 1)).reshape(original_shape)
+    return _sigmoid(flat_scaled)
+
+
+def combine_distance_matrices(
+    matrices: List[np.ndarray],
+    weights: Optional[List[float]] = None,
+    use_robust_scaling: bool = False,
+    preserve_zero_diagonal: bool = True,
+) -> np.ndarray:
+    """
+    Combine already computed distance matrices with optional robust-sigmoid scaling.
+
+    This is useful for native mOVF outputs, where ovf computes distances directly
+    and no descriptor-metric pipeline is available for EnsembleComparator.
+    When preserve_zero_diagonal=True, diagonal values are not scaled or overwritten.
+    """
+    if not matrices:
+        raise ValueError("At least one matrix is required.")
+
+    matrices = [np.asarray(matrix, dtype=float) for matrix in matrices]
+    first_shape = matrices[0].shape
+    for matrix in matrices:
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            raise ValueError("All matrices must be square 2D arrays.")
+        if matrix.shape != first_shape:
+            raise ValueError("All matrices must have the same shape.")
+
+    if weights is None:
+        weights = [1.0] * len(matrices)
+    if len(weights) != len(matrices):
+        raise ValueError("The number of weights must match the number of matrices.")
+    normalized_weights = _normalize_weights(weights)
+
+    processed_matrices = []
+    for matrix in matrices:
+        processed = matrix.copy()
+        if use_robust_scaling:
+            processed = _robust_scale_matrix(
+                processed,
+                preserve_diagonal=preserve_zero_diagonal,
+            )
+        processed_matrices.append(processed)
+
+    combined = np.zeros_like(processed_matrices[0])
+    for weight, matrix in zip(normalized_weights, processed_matrices):
+        combined += weight * matrix
+
+    return combined
 
 
 class StructureComparator:
@@ -365,6 +450,8 @@ class StructureComparator:
     def metric_name(self) -> str:
         """Metric name."""
         return self.metric.name
+
+
 class EnsembleComparator:
     """
     Combines multiple descriptor-metric pipelines into a single weighted similarity/distance matrix.
@@ -390,12 +477,8 @@ class EnsembleComparator:
         if not configs:
             raise ValueError("At least one (descriptor, metric, weight) configuration is required.")
             
-        # Validate and normalize weights to sum to 1.0
-        raw_weights = [cfg[2] for cfg in configs]
-        total_weight = sum(raw_weights)
-        if total_weight == 0:
-            raise ValueError("Weights cannot sum to zero.")
-        self.weights = [w / total_weight for w in raw_weights]
+        # Validate and normalize weights to sum to 1.0.
+        self.weights = _normalize_weights([cfg[2] for cfg in configs])
         
         self.use_robust_scaling = use_robust_scaling
         self.comparators = [
@@ -429,10 +512,7 @@ class EnsembleComparator:
             mat = comp.compare(paths)
             
             if self.use_robust_scaling:
-                # RobustScaler operates on 2D arrays. Flatten, scale, reshape to preserve symmetry.
-                scaler = RobustScaler()
-                flat_scaled = scaler.fit_transform(mat.flatten().reshape(-1, 1)).flatten()
-                mat = flat_scaled.reshape(mat.shape)
+                mat = _robust_scale_matrix(np.asarray(mat, dtype=float))
                 
             matrices.append(mat)
             

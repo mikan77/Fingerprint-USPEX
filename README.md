@@ -102,6 +102,37 @@ df = comparator.compare_to_dataframe(paths)
 - `"zscore"`: apply column-wise z-score normalization;
 - `"minmax"`: apply column-wise min-max normalization.
 
+### Combining Descriptor Pipelines
+
+`EnsembleComparator` combines multiple Python descriptor + metric pipelines into one weighted distance matrix:
+
+```python
+from core.comparator import EnsembleComparator
+from descriptors.cell import CellDescriptor
+from descriptors.soap import SOAPDescriptor
+from metrics.cosine import CosineMetric
+
+comparator = EnsembleComparator(
+    configs=[
+        (CellDescriptor(["C", "O"]), CosineMetric(), 1.0),
+        (SOAPDescriptor(["C", "O"]), CosineMetric(), 2.0),
+    ],
+    use_robust_scaling=True,
+)
+
+matrix = comparator.compare(paths)
+```
+
+Weights are normalized internally, so weights `[1.0, 2.0]` become `[1/3, 2/3]`. With `use_robust_scaling=True`, each component matrix is processed independently:
+
+```text
+x_robust = (x - median) / IQR
+x_final = 1 / (1 + exp(-x_robust))
+combined = sum(weight_i * x_final_i)
+```
+
+The diagonal is not included in robust-sigmoid scaling and is left unchanged. For valid distance matrices this keeps the diagonal at `0.0` without letting diagonal zeros affect the median/IQR.
+
 ## Descriptors
 
 ### CellDescriptor
@@ -316,6 +347,32 @@ adf_matrix = runner.compare(poscars)
 ```
 
 `distance_component="rdf"` selects the normal distance/RDF part. `distance_component="angle"` selects the angle/ADF part and is valid only with `fingerprint_type="a"`.
+
+### Combining Native mOVF RDF and ADF Distances
+
+`OVFRunner` is not a `BaseDescriptor`: the native `ovf` executable computes fingerprints and distances internally. For this reason, RDF/ADF output from `ovf_macos` should be combined as ready-made distance matrices rather than passed to `EnsembleComparator`.
+
+Use `combine_distance_matrices` for this case:
+
+```python
+from backends import OVFRunner
+from core.comparator import combine_distance_matrices
+
+runner = OVFRunner(
+    fingerprint_type="a",
+    metric="cosine",
+)
+
+components = runner.compare_components(poscars)
+
+combined = combine_distance_matrices(
+    matrices=[components["rdf"], components["adf"]],
+    weights=[0.5, 0.5],
+    use_robust_scaling=True,
+)
+```
+
+With `use_robust_scaling=True`, RDF and ADF matrices are scaled independently with `RobustScaler`, mapped through sigmoid to `(0, 1)`, and then combined by normalized weights. Diagonal values are excluded from scaling and left unchanged.
 
 ### OVFRunner Parameters
 
